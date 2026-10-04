@@ -28,6 +28,7 @@ Python POC — run from `python/`, always with the project venv (the `python` on
 .venv\Scripts\python -m pytest tests/test_recovery.py -k queda
 .venv\Scripts\python -m pytest -m cadastro          # grava the fictitious case tests/data/caso_teste.json (002-PF-013110-03) in local dadosValidador
 .venv\Scripts\python scripts\dump_tree.py "Passo 1" # dump JAB tree of open Java windows with .iBot-style paths
+.venv\Scripts\python -m simba.ui                    # desktop app (PySide6): connect to ServiceNow
 ```
 
 Tests drive the real installed app (no mocks) and kill any running Simba instance. The `cadastro` marker (excluded by default in `pytest.ini`; run only with authorization) covers `test_cadastro.py`, `test_validacao.py` and `test_fluxo.py` — all of them create local atendimentos. The session-scoped `simba` fixture restarts the app once and kills it at the end; the terminal summary prints per-step timings and retry counts from `SimbaApp.timings`. `ERROR ... Failed to enumerate window` log lines come from JABWrapper probing non-Java windows and are harmless.
@@ -47,6 +48,7 @@ Tests drive the real installed app (no mocks) and kill any running Simba instanc
 - `fluxo.processar(app, caso, pasta)` — whole flow in two `run_step`s: `cadastro` (preencher + gravar) and `validar_e_gerar` (Passo 2 + Passo 3 + Fechar; kept together because Passo 3 only opens from an approved Passo 2). `Caso.tipo` comes from the JSON `Tipo`. Per user decision, the `.iBot`'s MoveDirectory to "Para transmitir", queue and ServiceNow parts are out of scope.
 - Passo 2 and Passo 3 windows have an empty title; `Screen.marker` (a label checked by path) tells them apart.
 - `.iBot` paths use `indexInParent`, not child position — they differ for tab content panels (`Element._child_by_index` handles both).
+- `servicenow.py` — REST client (`requests`, no MCP). Two auth modes: browser session (cookies + `g_ck` as `X-UserToken`, needed because PROD uses SSO) and basic auth. `simba/ui/sso.py` does the SSO login in an embedded QtWebEngine window with an off-the-record profile and only accepts once `/api/now/ui/user/current_user` returns a non-guest user (the login page's `g_ck` belongs to the guest session).
 - `config.py` resolves the real Documents folder (OneDrive-redirected), overridable with `SIMBA_HOME`. The `.iBot` hardcodes `C:\Users\<user>\Documents`, which is wrong on this machine.
 
 ## .iBot XML structure (needed to read flows)
