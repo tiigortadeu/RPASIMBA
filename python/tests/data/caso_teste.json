@@ -1,0 +1,38 @@
+{
+  "Destino": "002-PF",
+  "Caso": "013110",
+  "DV": "03",
+  "Tipo": "Corretora",
+  "Judtask": "",
+  "Código": "999",
+  "Banco": "BANCO TESTE AUTOMACAO",
+  "CNPJ": "11222333000181",
+  "Responsável": "Responsavel Teste",
+  "Telefone": "11999999999",
+  "Email": "teste@example.com",
+  "Data": "03/10/2026",
+  "Processo": "00000000020268260001",
+  "Vara": "1",
+  "Tribunal": "Tribunal Teste",
+  "Magistrado": "Magistrado Teste",
+  "Cargo": "Juiz",
+  "Início": "01/01/2025",
+  "Fim": "31/12/2025",
+  "Sisbajud": "20260000000001",
+  "Ofício": "1/2026",
+  "Descrição": "Atendimento de teste da automacao Python",
+  "Investigados": [
+    {
+      "Investigado_Type": "PF",
+      "Investigado_ID": "529.982.247-25",
+      "Investigado_Nome": "Pessoa Fisica Teste",
+      "Investigado_Info": "Investigado PF de teste"
+    },
+    {
+      "Investigado_Type": "PJ",
+      "Investigado_ID": "11.222.333/0001-81",
+      "Investigado_Nome": "Empresa Teste Ltda",
+      "Investigado_Info": "Investigado PJ de teste"
+    }
+  ]
+}
