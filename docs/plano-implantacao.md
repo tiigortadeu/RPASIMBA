@@ -86,9 +86,13 @@ Como fazer: [teste-em-outro-computador.md](teste-em-outro-computador.md).
 
 | # | Atividade | Situação |
 |---|---|---|
-| 3.1 | Cliente REST, reserva, heartbeat, reaper, conclusão/falha | 🟡 escrito; testes `pytest -m servicenow` prontos, nunca executados (F3) |
+| 3.0 | **Primeiro teste integrado no DEV** (JUDTASK0172345, 06/10/2026): usuário de integração autenticou; runner baixou os GABs, cadastrou, validou, gerou o pacote e anexou 9 arquivos na tarefa em 9,4s | ✅ fluxo · ⬜ status do work item (ver 3.3a) |
+| 3.1 | Cliente REST, reserva, heartbeat, reaper, conclusão/falha | 🟡 testado no DEV até a gravação do status; testes `pytest -m servicenow` não executados (F3) |
 | 3.2 | Comentários de erro e notas na JUDTASK | 🟡 texto testado; gravação no SN não testada |
-| 3.3 | Usuário de integração no DEV e fila de teste "Simba Runner Teste" | ⬜ depende do time do SN |
+| 3.3 | Usuário de integração no DEV e fila de teste "Simba Runner Teste" | 🟡 usuário existe e autentica · ⬜ fila de teste |
+| 3.3a | **Dar o papel `sn_rpa_fdn.rpa_robot` ao usuário de integração** (sem ele o SN ignora a gravação do status do work item) e repetir o teste da JUDTASK0172345 (F13) | ✅ papel dado; item concluído com `success` |
+| 3.3b | Transmissão direta no item do Validador (sem esperar a tarefa/fila do Transmissor), chave escolhida pelo CNPJ do caso (`SIMBA_CHAVE_<CNPJ>`) | 🟡 testada no DEV até a chave (sem chave nesta máquina): falha registrada e comentada na JUDTASK |
+| 3.3c | **Retry do ServiceNow ao falhar:** ele recria o work item na hora; falhas permanentes viram loop (F14) | ⬜ **bloqueante**: definir regra com o time do SN ou limitar no runner |
 | 3.4 | Respostas do time do SN: o fluxo usa só o `status`? O `request_content` do Validador traz o JSON? (F4) | ⬜ |
 | 3.5 | **Regra de escolha dos itens da fila**: hoje é do mais antigo para o mais novo, sem critério (F12) | ⬜ definir com o negócio e implantar em `fila.reservar` |
 | 3.6 | Ponta a ponta no DEV: JUDTASK de teste com GABs → Validador → Transmissor até a senha | ⬜ |
@@ -133,7 +137,7 @@ Como fazer: [teste-em-outro-computador.md](teste-em-outro-computador.md).
 
 | Item | Depende de |
 |---|---|
-| Usuário de integração, fila de teste, desligar Intellibot, dúvidas do fluxo | Time do ServiceNow |
+| **Papel `sn_rpa_fdn.rpa_robot`** no usuário de integração, fila de teste, desligar Intellibot, dúvidas do fluxo | Time do ServiceNow |
 | Regra de prioridade dos itens | Negócio + time do ServiceNow |
 | Chaves e senhas das 4 instituições; autorização das chaves | Responsáveis pelo Simba em cada instituição |
 | Caso real para o envio controlado; retenção de dados | Negócio / jurídico / DPO |

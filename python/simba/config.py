@@ -21,6 +21,9 @@ TRANSMISSOR_EXE = SIMBA_HOME / "Transmissor" / "simba-transmissor.exe"
 TRANSMITIDOS = Path(os.environ.get("SIMBA_TRANSMITIDOS", SIMBA_HOME / "Transmitidos"))
 # Atendimentos já processados saem do dadosValidador para cá, para as listas do Simba não crescerem.
 ARQUIVO_DIR = Path(os.environ.get("SIMBA_ARQUIVO", SIMBA_HOME / "Arquivo"))
+# Transmite logo depois da validação, no mesmo work item e com o pacote gerado nesta máquina, sem esperar a
+# tarefa/fila do Transmissor. A chave vem do CNPJ do caso: SIMBA_CHAVE_<CNPJ só dígitos>=<arquivo de chaves>.
+TRANSMITIR_APOS_VALIDAR = os.environ.get("SIMBA_TRANSMITIR_APOS_VALIDAR", "1") == "1"
 # Arquivos de chaves do Transmissor, um por instituição; a senha de cada um fica em SIMBA_SENHA_<NOME DA CHAVE>.
 CHAVES_DIR = Path(os.environ.get("SIMBA_CHAVES_DIR", SIMBA_HOME / "Chaves"))
 

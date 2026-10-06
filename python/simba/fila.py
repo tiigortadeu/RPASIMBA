@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Iterator, Optional
 
 from simba import config
-from simba.servicenow import ServiceNow, agora_utc, formatar_data, ler_data
+from simba.servicenow import ServiceNow, ServiceNowError, agora_utc, formatar_data, ler_data
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +25,18 @@ CAMPOS = "sys_id,name,status,locked,remarks,stage,attempts_count,deferred_till,r
 MAX_RESPOSTA = 4000
 
 
+# Só quem tem este papel explicitamente grava status/locked/stage/etc. do work item (ACL sn_rpa_fdn_work_queue_item.*).
+PAPEL_ROBO = "sn_rpa_fdn.rpa_robot"
+# Campos conferidos depois de cada gravação: o SN ignora em silêncio os que a ACL não permite.
+CAMPOS_CONFERIDOS = ("status", "locked", "stage", "exception_type")
+
+
 class ReservaPerdida(Exception):
     """Outro runner (ou o reaper) assumiu o item: não mexer mais nele."""
+
+
+class SemPermissao(ServiceNowError):
+    """O SN aceitou a gravação mas ignorou campos do work item por falta de permissão. Exige ação no SN."""
 
 
 @dataclass
@@ -75,7 +85,14 @@ class Fila:
 
     def _gravar(self, sys_id: str, valores: dict[str, object]) -> None:
         with self._lock:
-            self.sn.atualizar(TABELA, sys_id, valores)
+            gravado = self.sn.atualizar(TABELA, sys_id, valores, campos=",".join(valores))
+        # O SN responde 200 mas ignora campos sem permissão de escrita (ACL de campo): confere na resposta.
+        ignorados = [c for c in CAMPOS_CONFERIDOS if c in valores and gravado.get(c) != str(valores[c])]
+        if ignorados:
+            raise SemPermissao(
+                f"O ServiceNow não gravou {', '.join(ignorados)} no work item {sys_id}: o usuário de integração "
+                f"precisa do papel {PAPEL_ROBO} (ACL {TABELA}.*)"
+            )
 
     # --- reserva -----------------------------------------------------------
 
@@ -101,17 +118,23 @@ class Fila:
             return None
         marca = f"runner={self.runner_id};token={uuid.uuid4().hex}"
         tentativa = int(atual["attempts_count"] or 0) + 1
-        self._gravar(
-            sys_id,
-            {
-                "status": "in_progress",
-                "locked": "true",
-                "remarks": marca,
-                "stage": "reservado",
-                "last_started_time": formatar_data(agora_utc()),
-                "attempts_count": tentativa,
-            },
-        )
+        try:
+            self._gravar(
+                sys_id,
+                {
+                    "status": "in_progress",
+                    "locked": "true",
+                    "remarks": marca,
+                    "stage": "reservado",
+                    "last_started_time": formatar_data(agora_utc()),
+                    "attempts_count": tentativa,
+                },
+            )
+        except SemPermissao:
+            # O remarks tem ACL própria e pode ter sido gravado: devolve o valor anterior.
+            with self._lock:
+                self.sn.atualizar(TABELA, sys_id, {"remarks": atual["remarks"]})
+            raise
         time.sleep(config.RESERVA_VERIFICACAO)
         if self._ler(sys_id)["remarks"] != marca:
             log.info("Item %s reservado por outro runner", atual["name"])

@@ -21,7 +21,7 @@ from simba.app import TRANSMISSOR, VALIDADOR, SimbaApp, SimbaAviso, StepFailed
 from simba.cadastro import Caso
 from simba.fila import Fila, Item, ReservaPerdida
 from simba.servicenow import TABELA_TAREFAS, ServiceNow, ServiceNowError
-from simba.transmissao import TransmissaoIncerta
+from simba.transmissao import ResultadoTransmissao, TransmissaoIncerta
 
 log = logging.getLogger("simba.runner")
 
@@ -46,10 +46,8 @@ def nome_variavel_senha(chave: str) -> str:
 class Runner:
     def __init__(self, sn: ServiceNow, filas: list[str]) -> None:
         self.sn = sn
-        self.filas = {
-            nome: Fila(sn, FILAS[nome], frozenset({"enviando", "registrando"}) if nome == "transmissor" else frozenset())
-            for nome in filas
-        }
+        # Depois do Enviar o item nunca volta para a fila (vale também para o Validador quando ele já transmite).
+        self.filas = {nome: Fila(sn, FILAS[nome], frozenset({"enviando", "registrando"})) for nome in filas}
         self.handlers: dict[str, Callable[[Fila, Item, Path], None]] = {
             "validador": self.validador,
             "transmissor": self.transmissor,
@@ -78,6 +76,8 @@ class Runner:
                         # Ex.: SN fora do ar ao reservar, disco cheio. O runner continua; se um item ficou em
                         # andamento, o reaper o recolhe depois do lease e comenta na JUDTASK.
                         log.exception("Falha fora do processamento de item na fila %s", FILAS[nome])
+                        if uma_vez:
+                            raise
                         time.sleep(config.FILA_VAZIA_ESPERA)
                 if not processou:
                     if uma_vez:
@@ -200,20 +200,28 @@ class Runner:
             judtask = dados["Judtask"]
         except (ValueError, KeyError, AttributeError) as err:
             raise DadosInvalidos(f"JSON do caso inválido ou incompleto: {err!r}") from err
+        if config.TRANSMITIR_APOS_VALIDAR:
+            tarefa = self.sn.obter(TABELA_TAREFAS, judtask, "number,evidence_attachment")
+            if tarefa["evidence_attachment"]:
+                # Anti-duplicidade: o comprovante só é gravado depois de um envio bem-sucedido.
+                fila.concluir(item, f"Comprovante já registrado em {tarefa['number']}; atendimento não reenviado")
+                return
         try:
             self._validar(fila, item, pasta, caso, judtask)
         finally:
-            # Sucesso ou falha: o atendimento sai da lista do Validador (o Simba precisa estar fechado).
+            # Sucesso ou falha: o atendimento sai das listas do Simba (os programas precisam estar fechados).
             self.app_validador.kill()
+            self.app_transmissor.kill()
             _arquivar(caso.pasta)
 
     def _validar(self, fila: Fila, item: Item, pasta: Path, caso: Caso, judtask: str) -> None:
         fila.etapa(item, "baixando")
         arquivos = pasta / caso.pasta
         arquivos.mkdir()
-        anexos = self.sn.anexos(TABELA_TAREFAS, judtask)
+        # Só os arquivos de entrada: a tarefa também guarda a saída de execuções anteriores (pacote, base do Simba).
+        anexos = [a for a in self.sn.anexos(TABELA_TAREFAS, judtask) if _arquivo_de_entrada(a["file_name"], caso.pasta)]
         if not anexos:
-            raise DadosInvalidos(f"Tarefa {judtask} sem anexos para validar")
+            raise DadosInvalidos(f"Tarefa {judtask} sem arquivos {caso.pasta}_*.txt para validar")
         for anexo in anexos:
             self.sn.baixar_anexo(anexo, arquivos)
 
@@ -221,22 +229,82 @@ class Runner:
         resultado = fluxo.processar(self.app_validador, caso, arquivos)
 
         fila.etapa(item, "anexando")
-        self._anexar_pasta(judtask, arquivo.dados_validador(caso.pasta))
+        self._anexar_pasta(judtask, arquivo.dados_validador(caso.pasta), arquivos)
         resposta = f"{caso.pasta} validado e gerado; hash {resultado.hash}"
         if resultado.correcoes:
-            # Auditoria: o que mudou nos arquivos validados (as cópias corrigidas estão em arqtxt, já anexadas).
+            # Auditoria: o que mudou nos arquivos validados (as cópias corrigidas vão como *_corrigido).
             notificacao.registrar_correcoes(self.sn, judtask, fila.nome, item.nome, resultado.correcoes)
             resposta += f"; {len(resultado.correcoes)} correção(ões) automática(s) nos arquivos"
+
+        if config.TRANSMITIR_APOS_VALIDAR:
+            # Transmite já com o pacote gerado nesta máquina, sem esperar a tarefa/fila do Transmissor.
+            fila.etapa(item, "preparando_envio")
+            chave, senha = self._chave_e_senha(self._chave_da_instituicao(caso.cnpj))
+            # O Transmissor só lê a lista de atendimentos ao abrir.
+            self.app_transmissor.kill()
+            transmitido = fluxo.transmitir(
+                self.app_transmissor,
+                caso.pasta,
+                arquivos,
+                chave,
+                senha,
+                antes_de_enviar=lambda: fila.etapa(item, "enviando"),
+            )
+            fila.etapa(item, "registrando")
+            self._registrar_comprovante(judtask, transmitido)
+            resposta += f"; transmitido: {transmitido.mensagem}"
         fila.concluir(item, resposta)
 
-    def _anexar_pasta(self, judtask: str, pasta: Path) -> None:
-        """Arquivos da pasta e das subpastas de primeiro nível (como o Uploads do .iBot), sem duplicar anexos."""
-        existentes = {(a["file_name"], int(a["size_bytes"])) for a in self.sn.anexos(TABELA_TAREFAS, judtask)}
+    def _anexar_pasta(self, judtask: str, pasta: Path, originais: Path) -> None:
+        """Sobe a saída do Validador (pasta e subpastas de primeiro nível, como o Uploads do .iBot).
+
+        Arquivos gerados (pacote, hash, base do Simba) substituem os de mesmo nome já anexados: num
+        reprocessamento o pacote é regerado e o anexo antigo ficaria desatualizado. Cópias dos arquivos de entrada
+        (os GABs em arqtxt) nunca apagam os originais da tarefa: só sobem se diferirem (correção automática),
+        com o sufixo _corrigido.
+        """
+        anexados: dict[str, list[dict]] = {}
+        for anexo in self.sn.anexos(TABELA_TAREFAS, judtask):
+            anexados.setdefault(anexo["file_name"], []).append(anexo)
         arquivos = [p for p in pasta.iterdir() if p.is_file()]
         arquivos += [p for sub in pasta.iterdir() if sub.is_dir() for p in sub.iterdir() if p.is_file()]
-        for arquivo in arquivos:
-            if (arquivo.name, arquivo.stat().st_size) not in existentes:
-                self.sn.anexar(TABELA_TAREFAS, judtask, arquivo)
+        for gerado in arquivos:
+            original = originais / gerado.name
+            if original.is_file():
+                if gerado.read_bytes() == original.read_bytes():
+                    continue
+                # Cópia na pasta de trabalho: o dadosValidador vai intacto para o arquivo.
+                corrigidos = originais.parent / "corrigidos"
+                corrigidos.mkdir(exist_ok=True)
+                gerado = Path(shutil.copy2(gerado, corrigidos / f"{gerado.stem}_corrigido{gerado.suffix}"))
+            for antigo in anexados.get(gerado.name, []):
+                self.sn.excluir_anexo(antigo["sys_id"])
+            self.sn.anexar(TABELA_TAREFAS, judtask, gerado)
+
+    def _chave_da_instituicao(self, cnpj: str) -> str:
+        """Nome do arquivo de chaves da instituição do caso (SIMBA_CHAVE_<CNPJ só com dígitos> no .env)."""
+        variavel = "SIMBA_CHAVE_" + re.sub(r"\D", "", cnpj)
+        nome = os.environ.get(variavel)
+        if not nome:
+            raise AcaoManual(f"Arquivo de chaves da instituição CNPJ {cnpj} não configurado ({variavel} no .env)")
+        return nome
+
+    def _chave_e_senha(self, nome_chave: str) -> tuple[Path, str]:
+        chave = config.CHAVES_DIR / nome_chave
+        variavel = nome_variavel_senha(nome_chave)
+        senha = os.environ.get(variavel)
+        if not chave.is_file():
+            raise AcaoManual(f"Arquivo de chaves não encontrado no runner: {chave}")
+        if not senha:
+            raise AcaoManual(f"Senha da chave {nome_chave} não configurada ({variavel} no .env)")
+        return chave, senha
+
+    def _registrar_comprovante(self, judtask: str, resultado: ResultadoTransmissao) -> None:
+        """Comprovante no campo evidence_attachment da tarefa (file_attachment: anexo em ZZ_YY<tabela>)."""
+        if resultado.comprovante is None:
+            raise AcaoManual(f"Enviado, mas o comprovante não foi encontrado: {resultado.mensagem}")
+        anexo = self.sn.anexar(TABELA_EVIDENCIA, judtask, resultado.comprovante)
+        self.sn.atualizar(TABELA_TAREFAS, judtask, {"evidence_attachment": anexo})
 
     # --- Simba Transmissor ---------------------------------------------------------
 
@@ -254,13 +322,7 @@ class Runner:
             fila.concluir(item, f"Comprovante já registrado em {tarefa['number']}; atendimento não reenviado")
             return
 
-        chave = config.CHAVES_DIR / nome_chave
-        variavel = nome_variavel_senha(nome_chave)
-        senha = os.environ.get(variavel)
-        if not chave.is_file():
-            raise AcaoManual(f"Arquivo de chaves não encontrado no runner: {chave}")
-        if not senha:
-            raise AcaoManual(f"Senha da chave {nome_chave} não configurada ({variavel} no .env)")
+        chave, senha = self._chave_e_senha(nome_chave)
         try:
             self._transmitir(fila, item, pasta, tarefa, atendimento, chave, senha)
         finally:
@@ -287,7 +349,7 @@ class Runner:
         gabs = pasta / "arquivos"
         gabs.mkdir()
         for nome, anexo in anexos.items():
-            if nome.startswith(f"{atendimento}_") and nome.endswith(".txt"):
+            if _arquivo_de_entrada(nome, atendimento):
                 self.sn.baixar_anexo(anexo, gabs)
         if not any(gabs.iterdir()):
             log.warning("%s: nenhum arquivo validado anexado; o zip dos GABs não será gerado", tarefa["number"])
@@ -305,11 +367,17 @@ class Runner:
         self.app_transmissor.kill()
 
         fila.etapa(item, "registrando")
-        if resultado.comprovante is None:
-            raise AcaoManual(f"Enviado, mas o comprovante não foi encontrado: {resultado.mensagem}")
-        anexo = self.sn.anexar(TABELA_EVIDENCIA, judtask, resultado.comprovante)
-        self.sn.atualizar(TABELA_TAREFAS, judtask, {"evidence_attachment": anexo})
+        self._registrar_comprovante(judtask, resultado)
         fila.concluir(item, resultado.mensagem)
+
+
+# Gerados pelo Validador (arqtxt) com o mesmo prefixo dos arquivos de entrada.
+GERADOS_PELO_SIMBA = ("_ATENDIMENTO.txt", "_INVESTIGADO.txt", "_corrigido.txt")
+
+
+def _arquivo_de_entrada(nome: str, atendimento: str) -> bool:
+    """GAB/CC 3454 enviado para validação: <atendimento>_<TIPO>.txt, fora os arquivos que o próprio RPA anexa."""
+    return nome.startswith(f"{atendimento}_") and nome.endswith(".txt") and not nome.endswith(GERADOS_PELO_SIMBA)
 
 
 def _arquivar(atendimento: str) -> None:
@@ -338,21 +406,34 @@ def _configurar_log() -> None:
         pasta / "runner.log", maxBytes=10 * 1024 * 1024, backupCount=10, encoding="utf-8"
     )
     console = logging.StreamHandler()
+    raiz = logging.getLogger()
+    # O java-access-bridge-wrapper configura o log raiz ao ser importado; sem isto cada linha sai duplicada.
+    raiz.handlers.clear()
     for handler in (arquivo, console):
         handler.setFormatter(formato)
-        logging.getLogger().addHandler(handler)
-    logging.getLogger().setLevel(logging.INFO)
+        raiz.addHandler(handler)
+    raiz.setLevel(logging.INFO)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--filas", default="validador,transmissor", help="filas a consumir, separadas por vírgula")
+    parser.add_argument(
+        "--filas",
+        default="validador" if config.TRANSMITIR_APOS_VALIDAR else "validador,transmissor",
+        help="filas a consumir, separadas por vírgula",
+    )
     parser.add_argument("--uma-vez", action="store_true", help="processa no máximo um item e sai")
     args = parser.parse_args()
     filas = [f.strip() for f in args.filas.split(",") if f.strip()]
     invalidas = [f for f in filas if f not in FILAS]
     if invalidas:
         parser.error(f"filas desconhecidas: {invalidas} (use {', '.join(FILAS)})")
+    if config.TRANSMITIR_APOS_VALIDAR and "transmissor" in filas:
+        # O mesmo atendimento seria transmitido duas vezes: pelo item do Validador e pelo do Transmissor.
+        parser.error(
+            "com SIMBA_TRANSMITIR_APOS_VALIDAR=1 o Validador já transmite; não consuma também a fila do Transmissor "
+            "(use --filas validador)"
+        )
     if not (config.SN_INSTANCIA and config.SN_USUARIO and config.SN_SENHA):
         parser.error("defina SN_INSTANCIA, SN_USUARIO e SN_SENHA (python/.env)")
 

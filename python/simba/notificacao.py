@@ -14,6 +14,7 @@ ETAPAS = {
     "baixando": "download dos arquivos anexados à tarefa",
     "validando": "cadastro e validação no Simba Validador",
     "anexando": "envio dos arquivos gerados para a tarefa",
+    "preparando_envio": "preparação da transmissão (arquivo de chaves e senha)",
     "enviando": "transmissão pelo Simba Transmissor",
     "registrando": "registro do comprovante na tarefa",
 }

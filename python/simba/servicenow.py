@@ -121,6 +121,9 @@ class ServiceNow:
             raise ServiceNowError(f"Download incompleto de {anexo['file_name']}: {destino.stat().st_size} bytes")
         return destino
 
+    def excluir_anexo(self, anexo_sys_id: str) -> None:
+        self._request("DELETE", f"/api/now/attachment/{anexo_sys_id}")
+
     def anexar(self, tabela: str, sys_id: str, arquivo: Path) -> str:
         """Sobe `arquivo` como anexo do registro e devolve o sys_id do anexo."""
         params = {"table_name": tabela, "table_sys_id": sys_id, "file_name": arquivo.name}
