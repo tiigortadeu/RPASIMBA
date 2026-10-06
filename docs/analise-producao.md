@@ -37,6 +37,7 @@
 | F9 | Conferência de integridade dos anexos baixados: hoje só o tamanho; o SN guarda um hash do anexo | Arquivo corrompido em trânsito | Média |
 | F10 | Limite de tamanho de anexo da instância (propriedade `com.glide.attachment.max_size`) e timeout de upload para pacotes grandes | Casos grandes podem falhar sempre | Média |
 | F11 | Fila "Execução de Garantias" (existe no SN) fora do escopo atual | Definir se entra no projeto | Definir |
+| F12 | **Regra de escolha dos itens da fila.** Hoje o runner pega os itens pendentes do mais antigo para o mais novo (sorteando entre os 20 mais antigos, só para os runners não disputarem o mesmo item), **sem nenhuma regra de negócio**. Ignora o campo `priority` do work item, prazos e qualquer outro critério | Com ~5000 casos, a ordem define o que atrasa. Casos urgentes (prazo judicial, prioridade alta) podem esperar atrás de milhares de casos antigos | Alta |
 
 ---
 
@@ -217,6 +218,7 @@ Consequências:
 - [ ] Chaves: autorização confirmada e estratégia de cópia local
 - [ ] Autostart/watchdog do runner e alertas básicos
 - [ ] Runbook do tratamento manual entregue ao time
+- [ ] Regra de escolha dos itens da fila definida com o negócio e implantada em `fila.reservar` (F12)
 - [ ] Piloto com poucos casos reais e poucos runners, comparando com o processo atual; depois, rampa
 
 ## 8. Perguntas em aberto
@@ -226,4 +228,12 @@ Consequências:
 3. A autorização da chave é por máquina ou por órgão? O órgão tem ambiente de teste (o Transmissor tem um rótulo oculto "Ambiente de testes")?
 4. Existe limite de envios por período no servidor do órgão?
 5. Qual a retenção exigida para comprovantes e para o zip dos GABs, e onde eles devem ficar?
+6. **Qual a regra de prioridade dos casos na fila (F12)?** Candidatos a critério:
+   - `priority` do work item ou da JUDTASK;
+   - prazo/SLA do ofício judicial;
+   - data do ofício;
+   - instituição ou órgão de destino;
+   - Validador antes de Transmissor (ou o contrário).
+
+   Também é preciso saber se o ServiceNow já preenche algum desses campos nos work items.
 6. Os comentários na JUDTASK podem conter as mensagens do Simba com CPF?

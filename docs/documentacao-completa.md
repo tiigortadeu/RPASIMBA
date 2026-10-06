@@ -85,7 +85,7 @@ JSON do caso (mesmas chaves do `.iBot`): `Destino`, `Caso`, `DV`, `Tipo` (`Banco
 `python -m simba.runner [--filas validador,transmissor] [--uma-vez]`. Em loop: reaper (a cada 5 min) → um item de cada fila por volta → espera 30s se as filas estiverem vazias.
 
 **Reserva** (`fila.py`). O Table API não tem update condicional, então:
-1. Lista até 50 itens `pending`, não travados e fora do `deferred_till`, e sorteia entre os 20 mais antigos.
+1. Lista até 50 itens `pending`, não travados e fora do `deferred_till`, e sorteia entre os 20 mais antigos. **Regra provisória:** a ordem por antiguidade não tem critério de negócio. A regra de prioridade ainda precisa ser definida e implantada (análise de produção, F12).
 2. Relê o item e grava `status=in_progress`, `locked=true`, `remarks=runner=<RUNNER_ID>;token=<uuid>`, `attempts_count+1`.
 3. Espera 2s e relê. Se o `remarks` não for o seu, outro runner venceu e ele desiste daquele item.
 
