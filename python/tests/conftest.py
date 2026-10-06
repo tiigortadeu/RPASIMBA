@@ -1,6 +1,6 @@
 import pytest
 
-from simba.app import SimbaApp
+from simba.app import TRANSMISSOR, SimbaApp
 
 _apps: list[SimbaApp] = []
 
@@ -9,6 +9,14 @@ _apps: list[SimbaApp] = []
 def simba() -> SimbaApp:
     app = SimbaApp()
     app.restart()
+    _apps.append(app)
+    yield app
+    app.kill()
+
+
+@pytest.fixture(scope="session")
+def transmissor() -> SimbaApp:
+    app = SimbaApp(TRANSMISSOR)
     _apps.append(app)
     yield app
     app.kill()

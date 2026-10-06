@@ -18,9 +18,12 @@ Ter uma aplicação Python que, sem intervenção humana:
 | Tema | Decisão |
 |---|---|
 | Acesso ao ServiceNow | REST API direta (Table API + Attachment API), **sem MCP** |
-| Autenticação | OAuth 2.0 |
-| Origem dos casos | Consulta direta à tabela no SN; a fila do WinAutomation deixa de existir |
+| Autenticação | Usuário de integração com basic auth (OAuth client credentials quando o time do SN confirmar) |
+| Origem dos casos | **Filas do RPA Hub já existentes** (`sn_rpa_fdn_work_queue_item`: "Simba Validador", "Simba Transmissor"). O fluxo do SN que cria os itens e encaminha Validador → Transmissor continua igual; os runners Python substituem os robôs Intellibot |
+| Escala | N runners sem estado (1 por sessão Windows), reserva por status + token (ver `simba/fila.py`) |
 | Onde construir | PC da empresa (Simba Validador e Transmissor instalados) |
+
+> **Atualização (05/10/2026):** a arquitetura de execução foi revista para N runners consumindo as filas do RPA Hub; está descrita em [estado-atual.md](estado-atual.md), seção "Runners". O orquestrador único da Fase 3 abaixo foi substituído por `python -m simba.runner`.
 
 ### Visão geral
 

@@ -1,6 +1,6 @@
 """Passo 3: gera o pacote de envio (zip + hash) de um atendimento com arquivos aprovados no Passo 2."""
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +15,8 @@ P3 = screens.PASSO_3
 class ResultadoGeracao:
     hash: str
     pacote: Path
+    # Correções automáticas aplicadas aos arquivos antes da validação aprovada (simba.correcao).
+    correcoes: list[str] = field(default_factory=list)
 
 
 def abrir_passo3(app: SimbaApp, atendimento: str) -> None:

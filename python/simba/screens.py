@@ -1,4 +1,4 @@
-"""Telas e controles do Simba Validador, extraídos do mapeamento do Simba Validador.iBot.
+"""Telas e controles do Simba Validador e do Simba Transmissor, extraídos do mapeamento dos .iBot.
 
 `path` é o caminho JAB (igual ao do .iBot). `label` é o nome acessível esperado:
 quando existe, é conferido no caminho e usado como fallback de busca se o caminho mudar.
@@ -159,3 +159,51 @@ PASSO_3 = Screen(
 )
 
 ALL = [PASSO_1, DADOS_DO_CASO, INVESTIGADO, ATENCAO, INFORMACAO, PASSO_2, DIRETORIO, PASSO_3, *DIALOGOS_DE_VALIDACAO]
+
+# --- Simba Transmissor (mapeado do Simba Transmissor.iBot e conferido com dump_tree) ---
+
+_TX = "root pane[0].layered pane[1].panel[0]."
+TRANSMISSOR = Screen(
+    "Transmissor",
+    "Transmissor de Afastamento de Sigilo Bancário",
+    {
+        "Atendimentos": Control("list", _TX + "scroll pane[2].viewport[0].list[0]"),
+        # Só habilita depois que um atendimento é selecionado.
+        "Selecionar chave": Control("push button", _TX + "panel[4].push button[2]", "Selecionar..."),
+        # Só habilita com um arquivo de chaves válido carregado.
+        "Enviar": Control("push button", _TX + "push button[5]", "Enviar dados do Atendimento Selecionado"),
+        # "<atendimento>\r\n<situação>", ex.: "Estes dados já foram validados e ainda não foram enviados."
+        "Informação": Control("text", _TX + "scroll pane[6].viewport[0].text[0]"),
+    },
+)
+
+ABRIR_CHAVE = Screen(
+    "Abrir chave",
+    "Abrir",
+    {
+        "Arquivo": Control("text", _DIR + "panel[2].text[1]", "Nome do arquivo:"),
+        "Abrir": Control("push button", _DIR + "panel[4].push button[1]", "Abrir"),
+    },
+)
+
+_SENHA = "root pane[0].layered pane[1].panel[0].option pane[0]."
+SENHA_CHAVE = Screen(
+    "Senha da chave",
+    "Entre com a senha",
+    {
+        "Senha": Control("password text", _SENHA + "panel[0].panel[0].panel[1].password text[1]"),
+        "OK": Control("push button", _SENHA + "panel[1].push button[0]", "OK"),
+    },
+)
+
+# Abre depois do envio; caminhos do .iBot (não conferidos: sem chave nesta máquina o Enviar não habilita).
+COMPROVANTE = Screen(
+    "Comprovante",
+    "Selecione a pasta para salvar o comprovante de envio",
+    {
+        "Pasta": Control("text", _DIR + "panel[2].text[1]"),
+        "Selecionar Pasta": Control("push button", _DIR + "panel[4].push button[1]", "Selecionar Pasta"),
+    },
+)
+
+ALL_TRANSMISSOR = [TRANSMISSOR, ABRIR_CHAVE, SENHA_CHAVE, COMPROVANTE, INFORMACAO, *DIALOGOS_DE_VALIDACAO]

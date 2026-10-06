@@ -2,6 +2,7 @@ import logging
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
 import psutil
@@ -17,7 +18,29 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-KNOWN_TITLES = {screen.title for screen in screens.ALL}
+
+@dataclass(frozen=True)
+class Programa:
+    nome: str
+    exe: Path
+    jar: str
+    # Tela em que toda etapa começa (run_step/ensure_ready).
+    inicial: Screen
+    telas: tuple[Screen, ...]
+
+    @property
+    def titulos(self) -> set[str]:
+        return {screen.title for screen in self.telas}
+
+
+VALIDADOR = Programa("Simba Validador", config.SIMBA_EXE, "simba-validador.jar", screens.PASSO_1, tuple(screens.ALL))
+TRANSMISSOR = Programa(
+    "Simba Transmissor",
+    config.TRANSMISSOR_EXE,
+    "simba-transmissor.jar",
+    screens.TRANSMISSOR,
+    tuple(screens.ALL_TRANSMISSOR),
+)
 
 
 class UnexpectedWindow(Exception):
@@ -52,20 +75,20 @@ class StepTiming:
 
 
 class SimbaApp:
-    def __init__(self, bridge: Optional[Bridge] = None) -> None:
+    def __init__(self, programa: Programa = VALIDADOR, bridge: Optional[Bridge] = None) -> None:
+        self.programa = programa
         self.bridge = bridge or Bridge.get()
         self.timings: list[StepTiming] = []
 
     # --- processo -------------------------------------------------------
 
-    @staticmethod
-    def processes() -> list[psutil.Process]:
-        """Launcher simba-validador.exe e a JVM que roda o simba-validador.jar."""
+    def processes(self) -> list[psutil.Process]:
+        """Launcher (.exe) e a JVM que roda o .jar do programa."""
         found = []
         for proc in psutil.process_iter(["name", "cmdline"]):
             name = (proc.info["name"] or "").lower()
             cmdline = " ".join(proc.info["cmdline"] or []).lower()
-            if name == "simba-validador.exe" or (name.startswith("java") and "simba-validador.jar" in cmdline):
+            if name == self.programa.exe.name or (name.startswith("java") and self.programa.jar in cmdline):
                 found.append(proc)
         return found
 
@@ -76,10 +99,11 @@ class SimbaApp:
         return any(p.is_running() and p.status() != psutil.STATUS_ZOMBIE for p in self.processes())
 
     def start(self) -> None:
-        if not config.SIMBA_EXE.is_file():
-            raise FileNotFoundError(f"Simba Validador não encontrado em {config.SIMBA_EXE}")
-        subprocess.Popen([str(config.SIMBA_EXE)], cwd=str(config.SIMBA_EXE.parent))
-        self.window(screens.PASSO_1, timeout=config.STARTUP_TIMEOUT)
+        exe = self.programa.exe
+        if not exe.is_file():
+            raise FileNotFoundError(f"{self.programa.nome} não encontrado em {exe}")
+        subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        self.window(self.programa.inicial, timeout=config.STARTUP_TIMEOUT)
 
     def kill(self) -> None:
         procs = self.processes()
@@ -95,15 +119,15 @@ class SimbaApp:
         self.start()
 
     def ensure_ready(self) -> None:
-        """Garante o app aberto e na tela Passo 1; reinicia se estiver fechado ou travado."""
+        """Garante o app aberto e na tela inicial; reinicia se estiver fechado ou travado."""
         if not self.is_alive():
-            log.info("Simba não está rodando; iniciando")
+            log.info("%s não está rodando; iniciando", self.programa.nome)
             self.start()
             return
         try:
-            self.window(screens.PASSO_1, timeout=2)
+            self.window(self.programa.inicial, timeout=2)
         except ElementNotFound:
-            log.warning("Tela Passo 1 não responde; reiniciando o Simba")
+            log.warning("Tela %s não responde; reiniciando o %s", self.programa.inicial.name, self.programa.nome)
             self.restart()
 
     # --- telas e controles ----------------------------------------------
@@ -112,7 +136,7 @@ class SimbaApp:
         # Falha na hora se o Simba caiu, em vez de esperar o timeout da tela.
         pids = self.pids()
         if not pids:
-            raise AppNotRunning("Simba Validador não está rodando")
+            raise AppNotRunning(f"{self.programa.nome} não está rodando")
         return pids
 
     def _find_window(self, screen: Screen) -> Optional[Element]:
@@ -200,12 +224,12 @@ class SimbaApp:
                 win32gui.PostMessage(w.hwnd, win32con.WM_CLOSE, 0, 0)
 
     def unexpected_windows(self) -> list[str]:
-        return [w.title for w in self.bridge.windows(self.pids(), visible=True) if w.title not in KNOWN_TITLES]
+        return [w.title for w in self.bridge.windows(self.pids(), visible=True) if w.title not in self.programa.titulos]
 
     # --- execução de etapas com recuperação -------------------------------
 
     def run_step(self, step: str, fn: Callable[["SimbaApp"], T], retries: int = config.STEP_RETRIES) -> T:
-        """Executa `fn` a partir da tela Passo 1. Em falha, reinicia o Simba e tenta de novo."""
+        """Executa `fn` a partir da tela inicial do programa. Em falha, reinicia o Simba e tenta de novo."""
         started = time.monotonic()
         for attempt in range(1, retries + 2):
             try:
