@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from simba import config, screens
-from simba.app import RECOVERABLE, SimbaApp, SimbaAviso
+from simba.app import RECOVERABLE, SimbaApp, SimbaAviso, colar_no_campo
 from simba.jab import Element, ElementNotFound, wait_for
 
 log = logging.getLogger(__name__)
@@ -67,8 +67,24 @@ def carregar_chave(app: SimbaApp, chave: Path, senha: str) -> None:
     wait_for(lambda: _habilitado(botao), 5, "habilitar Selecionar...")
     botao.press()
     app.expect(screens.ABRIR_CHAVE)
-    app.control(screens.ABRIR_CHAVE, "Arquivo").set_text(str(chave))
+    caminho = str(chave)
+    campo = app.control(screens.ABRIR_CHAVE, "Arquivo")
+    # Caminho completo: o diálogo pode abrir em qualquer pasta. set_text pelo JAB não depende de foco de janela.
+    campo.set_text(caminho)
+    log.info("Chave %s: campo do diálogo Abrir = %r", caminho, campo.refresh().get_text())
     app.control(screens.ABRIR_CHAVE, "Abrir").press()
+    if not _dialogo_chave_respondeu(app):
+        log.warning(
+            "O diálogo Abrir não aceitou a chave pelo JAB (campo = %r); colando o caminho pelo teclado",
+            campo.refresh().get_text(),
+        )
+        colar_no_campo(campo, caminho)
+        app.control(screens.ABRIR_CHAVE, "Abrir").press()
+        if not _dialogo_chave_respondeu(app):
+            raise ElementNotFound(
+                f"O diálogo Abrir do Transmissor não aceitou a chave {caminho} "
+                f"(o campo mostra {campo.refresh().get_text()!r})"
+            )
 
     def senha_pedida() -> Optional[bool]:
         # Arquivo inexistente: o Transmissor responde com "Informação" (não com Aviso/Erro).
@@ -84,6 +100,20 @@ def carregar_chave(app: SimbaApp, chave: Path, senha: str) -> None:
     # Senha fora de 8-16 caracteres ou chave inválida abrem "Erro" (SimbaAviso via expect_value).
     enviar = app.control(TX, "Enviar")
     app.expect_value(lambda: _habilitado(enviar), config.SCREEN_TIMEOUT, "chave carregada (Enviar habilitado)")
+
+
+def _dialogo_chave_respondeu(app: SimbaApp) -> bool:
+    """Depois de Abrir: o diálogo fechou ou o Transmissor já pediu a senha / mostrou uma mensagem."""
+
+    def respondeu() -> Optional[bool]:
+        abertas = (app.is_open(screens.SENHA_CHAVE), app.is_open(screens.INFORMACAO),
+                   *(app.is_open(d) for d in screens.DIALOGOS_DE_VALIDACAO))
+        return any(abertas) or not app.is_open(screens.ABRIR_CHAVE) or None
+
+    try:
+        return wait_for(respondeu, 5, "resposta do diálogo Abrir")
+    except ElementNotFound:
+        return False
 
 
 def enviar(app: SimbaApp, pasta: Path) -> ResultadoTransmissao:

@@ -7,6 +7,8 @@ from typing import Callable, Optional, TypeVar
 
 import psutil
 import pywintypes
+import win32api
+import win32clipboard
 import win32con
 import win32gui
 import win32process
@@ -80,6 +82,32 @@ def tentar_trazer_para_frente(hwnd: int) -> None:
         win32gui.SetForegroundWindow(hwnd)
     except pywintypes.error:
         log.debug("Foco recusado para a janela %s; enviando a tecla mesmo assim", hwnd)
+
+
+def colar_no_campo(campo: Element, texto: str) -> None:
+    """Último recurso para campos que aceitam set_text pelo JAB sem atualizar o campo Java: clica no campo e cola
+    (Ctrl+A, Ctrl+V). Depende do foco da janela, que o Windows pode recusar a um runner em segundo plano."""
+    win32gui.SetForegroundWindow(campo.hwnd)
+    info = campo.info
+    x, y, largura, altura = int(info.x), int(info.y), int(info.width), int(info.height)
+    if largura > 0 and altura > 0:
+        win32api.SetCursorPos((x + largura // 2, y + altura // 2))
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, texto)
+    finally:
+        win32clipboard.CloseClipboard()
+    campo._bridge.jab.request_focus(campo.context)
+    wait_for(lambda: "focused" in campo.refresh().states.split(","), 2, "foco no campo")
+    time.sleep(0.2)
+    for tecla in (ord("A"), ord("V")):
+        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        win32api.keybd_event(tecla, 0, 0, 0)
+        win32api.keybd_event(tecla, 0, win32con.KEYEVENTF_KEYUP, 0)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
 
 
 @dataclass
