@@ -1,4 +1,5 @@
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -110,6 +111,9 @@ def colar_no_campo(campo: Element, texto: str) -> None:
         win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
 
 
+_OPCOES_DE_IDIOMA = ("-Duser.language=", "-Duser.country=", "-Duser.region=", "-Duser.variant=")
+
+
 @dataclass
 class StepTiming:
     step: str
@@ -146,7 +150,12 @@ class SimbaApp:
         exe = self.programa.exe
         if not exe.is_file():
             raise FileNotFoundError(f"{self.programa.nome} não encontrado em {exe}")
-        subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        # O idioma do Java vem de quem inicia o programa (o bot pode rodar com outro usuário/ambiente) e muda os
+        # títulos dos diálogos padrão ("Abrir"/"Open", "Erro"/"Error"). Com a opção repetida a JVM fica com a
+        # primeira: as de idioma já presentes no ambiente saem e entram as de SIMBA_JAVA_OPCOES.
+        herdadas = [o for o in os.environ.get("JAVA_TOOL_OPTIONS", "").split() if not o.startswith(_OPCOES_DE_IDIOMA)]
+        opcoes = " ".join([*herdadas, config.SIMBA_JAVA_OPCOES])
+        subprocess.Popen([str(exe)], cwd=str(exe.parent), env={**os.environ, "JAVA_TOOL_OPTIONS": opcoes})
         self.window(self.programa.inicial, timeout=config.STARTUP_TIMEOUT)
 
     def kill(self) -> None:

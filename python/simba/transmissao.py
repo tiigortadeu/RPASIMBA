@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import win32con
+import win32gui
+
 from simba import config, screens
 from simba.app import RECOVERABLE, SimbaApp, SimbaAviso, colar_no_campo
 from simba.jab import Element, ElementNotFound, wait_for
@@ -66,23 +69,31 @@ def carregar_chave(app: SimbaApp, chave: Path, senha: str) -> None:
     botao = app.control(TX, "Selecionar chave")
     wait_for(lambda: _habilitado(botao), 5, "habilitar Selecionar...")
     botao.press()
-    app.expect(screens.ABRIR_CHAVE)
+    # O diálogo de arquivo é um JFileChooser: título, textos e layout mudam com a versão/idioma do Java. Ele é
+    # encontrado pelo papel acessível "file chooser", não pelo título "Abrir" nem por posição.
+    janela, seletor = app.expect_value(
+        lambda: _seletor_de_arquivo(app), config.SCREEN_TIMEOUT, "diálogo de seleção do arquivo de chaves"
+    )
+    campo, confirmar = _campo_e_botao(seletor)
+    log.info(
+        "Diálogo da chave: janela %r, campo %r, botão %r",
+        janela.name, campo.name, confirmar.name if confirmar else "(nenhum: confirma com Enter)",
+    )
     caminho = str(chave)
-    campo = app.control(screens.ABRIR_CHAVE, "Arquivo")
     # Caminho completo: o diálogo pode abrir em qualquer pasta. set_text pelo JAB não depende de foco de janela.
     campo.set_text(caminho)
-    log.info("Chave %s: campo do diálogo Abrir = %r", caminho, campo.refresh().get_text())
-    app.control(screens.ABRIR_CHAVE, "Abrir").press()
+    log.info("Chave %s: campo do diálogo = %r", caminho, campo.refresh().get_text())
+    _confirmar_arquivo(janela, confirmar)
     if not _dialogo_chave_respondeu(app):
         log.warning(
-            "O diálogo Abrir não aceitou a chave pelo JAB (campo = %r); colando o caminho pelo teclado",
+            "O diálogo não aceitou a chave pelo JAB (campo = %r); colando o caminho pelo teclado",
             campo.refresh().get_text(),
         )
         colar_no_campo(campo, caminho)
-        app.control(screens.ABRIR_CHAVE, "Abrir").press()
+        _confirmar_arquivo(janela, confirmar)
         if not _dialogo_chave_respondeu(app):
             raise ElementNotFound(
-                f"O diálogo Abrir do Transmissor não aceitou a chave {caminho} "
+                f"O diálogo de arquivo do Transmissor não aceitou a chave {caminho} "
                 f"(o campo mostra {campo.refresh().get_text()!r})"
             )
 
@@ -102,16 +113,54 @@ def carregar_chave(app: SimbaApp, chave: Path, senha: str) -> None:
     app.expect_value(lambda: _habilitado(enviar), config.SCREEN_TIMEOUT, "chave carregada (Enviar habilitado)")
 
 
+# Rótulos do campo de nome e do botão de confirmar do JFileChooser, em português e inglês.
+NOMES_CAMPO = ("nome do arquivo", "file name")
+NOMES_CONFIRMAR = ("abrir", "open")
+
+
+def _seletor_de_arquivo(app: SimbaApp) -> Optional[tuple[Element, Element]]:
+    """(raiz da janela, file chooser) do diálogo de arquivo aberto pelo Transmissor, se houver."""
+    for janela in app.bridge.windows(app.pids(), visible=True):
+        if janela.title == TX.title:
+            continue
+        raiz = app.bridge.root(janela)
+        seletor = next((e for _, e in raiz.walk() if e.role == "file chooser"), None)
+        if seletor is not None:
+            return raiz, seletor
+    return None
+
+
+def _campo_e_botao(seletor: Element) -> tuple[Element, Optional[Element]]:
+    """Campo do nome do arquivo e botão de confirmar dentro do file chooser (por papel e rótulo, não posição)."""
+    elementos = [e for _, e in seletor.walk()]
+    editaveis = [e for e in elementos if e.role == "text" and "editable" in e.states.split(",")]
+    if not editaveis:
+        raise ElementNotFound("Campo do nome do arquivo não encontrado no diálogo da chave")
+    rotulados = [e for e in editaveis if e.name.strip().lower().rstrip(":") in NOMES_CAMPO]
+    campo = rotulados[0] if rotulados else editaveis[-1]
+    botoes = [e for e in elementos if e.role == "push button" and e.name.strip().lower() in NOMES_CONFIRMAR]
+    return campo, botoes[0] if botoes else None
+
+
+def _confirmar_arquivo(janela: Element, botao: Optional[Element]) -> None:
+    if botao is not None:
+        botao.press()
+        return
+    # Sem botão reconhecível: Enter direto na janela do diálogo (PostMessage não depende de foco).
+    win32gui.PostMessage(janela.hwnd, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
+    win32gui.PostMessage(janela.hwnd, win32con.WM_KEYUP, win32con.VK_RETURN, 0xC0000001)
+
+
 def _dialogo_chave_respondeu(app: SimbaApp) -> bool:
-    """Depois de Abrir: o diálogo fechou ou o Transmissor já pediu a senha / mostrou uma mensagem."""
+    """Depois de confirmar: o diálogo fechou ou o Transmissor já pediu a senha / mostrou uma mensagem."""
 
     def respondeu() -> Optional[bool]:
         abertas = (app.is_open(screens.SENHA_CHAVE), app.is_open(screens.INFORMACAO),
                    *(app.is_open(d) for d in screens.DIALOGOS_DE_VALIDACAO))
-        return any(abertas) or not app.is_open(screens.ABRIR_CHAVE) or None
+        return any(abertas) or _seletor_de_arquivo(app) is None or None
 
     try:
-        return wait_for(respondeu, 5, "resposta do diálogo Abrir")
+        return wait_for(respondeu, 5, "resposta do diálogo da chave")
     except ElementNotFound:
         return False
 
