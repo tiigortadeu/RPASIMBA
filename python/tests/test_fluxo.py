@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from gab_ficticio import DEFEITOS_CORRIGIVEIS, ENDERECO_ACENTUADO, crlf, gerar_gab, gravar_gab, linhas_gab112
 
-from simba import cadastro, fluxo, validacao
+from simba import cadastro, fluxo, screens, validacao
 from simba.app import SimbaApp
 
 pytestmark = pytest.mark.cadastro
@@ -24,7 +24,7 @@ def test_processa_caso_do_cadastro_ao_pacote_de_envio(simba: SimbaApp, tmp_path:
     # O Simba exibe o MD5 sem zeros à esquerda.
     assert int(resultado.hash, 16) == int(hashlib.md5(resultado.pacote.read_bytes()).hexdigest(), 16)
     assert (resultado.pacote.parent / f"{caso.pasta}.zip.hash").read_text().split("\t")[-1].strip() == resultado.hash
-    assert not simba.is_alive()  # Fechar do Passo 3 encerra o Simba
+    assert simba.is_open(screens.PASSO_1)  # volta ao Passo 1 para o próximo caso, sem fechar
     assert [t.step for t in simba.timings[-2:]] == ["cadastro", "validar_e_gerar"]
     assert all(t.ok and t.attempts == 1 for t in simba.timings[-2:])
     assert resultado.correcoes == []

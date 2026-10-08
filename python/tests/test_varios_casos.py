@@ -49,6 +49,8 @@ def test_processa_varios_casos_e_arquiva_cada_um(simba: SimbaApp, tmp_path: Path
 
         assert resultado.pacote.is_file()
         assert bool(resultado.correcoes) == bool(n % 2)
+        # O Validador volta ao Passo 1 aberto e mantém arquivos do caso em uso: só dá para arquivar fechado.
+        simba.kill()
         destino = arquivo.arquivar_atendimento(caso.pasta, arquivados)
         assert destino == arquivados / caso.pasta
         assert (destino / "envio" / f"{caso.pasta}.zip").is_file()

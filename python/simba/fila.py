@@ -1,18 +1,19 @@
-"""Work items das filas do RPA Hub (sn_rpa_fdn_work_queue_item) consumidos por N runners.
+"""Work items das filas do RPA Hub (sn_rpa_fdn_work_queue_item).
 
-O Table API não tem update condicional. A reserva grava status=in_progress com um token próprio em `remarks`
-e relê depois de RESERVA_VERIFICACAO: se dois runners reservarem juntos, o último PATCH vence e o outro desiste.
-O heartbeat mantém o lease (sys_updated_on); o reaper devolve itens de runners que caíram.
+O usuário de integração é bloqueado acima de 100 requisições/minuto, então cada gravação conta. Pensado para um
+runner por fila: a reserva lê o item e grava status=in_progress com um token próprio em `remarks`, sem releitura.
+A única conferência de posse (`confirmar`) é feita ao entrar numa etapa sem retorno (ex.: "enviando"), logo antes
+do Enviar: se outro runner tiver assumido o item, este desiste antes de transmitir.
+As demais etapas ficam só no item local (log e comentário de falha). O heartbeat mantém o lease (sys_updated_on);
+o reaper devolve itens de runners que caíram.
 """
 import logging
-import random
 import threading
-import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from simba import config
 from simba.servicenow import ServiceNow, ServiceNowError, agora_utc, formatar_data, ler_data
@@ -23,6 +24,8 @@ TABELA = "sn_rpa_fdn_work_queue_item"
 CAMPOS = "sys_id,name,status,locked,remarks,stage,attempts_count,deferred_till,request_content,sys_updated_on"
 # Tamanho do campo response_content no SN.
 MAX_RESPOSTA = 4000
+# Itens pendentes trazidos por listagem (uma requisição serve para vários itens).
+TAMANHO_LISTA = 50
 
 
 # Só quem tem este papel explicitamente grava status/locked/stage/etc. do work item (ACL sn_rpa_fdn_work_queue_item.*).
@@ -78,6 +81,13 @@ class Fila:
         self.runner_id = runner_id
         # O heartbeat roda em outra thread e a requests.Session não é thread-safe.
         self._lock = threading.Lock()
+        self._candidatos: list[str] = []
+        # Lista escolhida no console: só esses itens, sem consultar a fila; falhas podem ser reprocessadas.
+        self._lista_fixa = False
+
+    def usar_lista(self, sys_ids: list[str]) -> None:
+        self._candidatos = list(sys_ids)
+        self._lista_fixa = True
 
     def _ler(self, sys_id: str) -> dict[str, str]:
         with self._lock:
@@ -97,24 +107,37 @@ class Fila:
     # --- reserva -----------------------------------------------------------
 
     def reservar(self) -> Optional[Item]:
-        """Reserva o próximo item pendente da fila; None se não houver (ou se todos foram pegos por outros)."""
-        with self._lock:
-            pendentes = self.sn.listar(
-                TABELA, f"work_queue.name={self.nome}^status=pending^locked=false^ORDERBYsys_created_on", CAMPOS, 50
-            )
-        agora = agora_utc()
-        candidatos = [p for p in pendentes if (ler_data(p["deferred_till"]) or agora) <= agora][:20]
-        # Ordem aleatória entre os mais antigos: runners simultâneos raramente disputam o mesmo item.
-        random.shuffle(candidatos)
-        for candidato in candidatos:
-            item = self._tentar_reservar(candidato["sys_id"])
-            if item:
-                return item
+        """Reserva o próximo item pendente da fila; None se não houver.
+
+        Uma listagem serve para vários itens: só consulta a fila de novo quando os candidatos acabam.
+        """
+        for _ in range(2):
+            if not self._candidatos and self._lista_fixa:
+                return None
+            if not self._candidatos:
+                agora = agora_utc()
+                with self._lock:
+                    pendentes = self.sn.listar(
+                        TABELA,
+                        f"work_queue.name={self.nome}{filtro_desde()}^status=pending^locked=false^ORDERBYsys_created_on",
+                        "sys_id,deferred_till",
+                        TAMANHO_LISTA,
+                    )
+                self._candidatos = [p["sys_id"] for p in pendentes if (ler_data(p["deferred_till"]) or agora) <= agora]
+                if not self._candidatos:
+                    return None
+            while self._candidatos:
+                item = self._tentar_reservar(self._candidatos.pop(0))
+                if item:
+                    return item
         return None
 
     def _tentar_reservar(self, sys_id: str) -> Optional[Item]:
+        # A lista pode ter alguns minutos: relê o item antes de gravar por cima.
         atual = self._ler(sys_id)
-        if atual["status"] != "pending" or atual["locked"] == "true":
+        reservaveis = ("pending", "failure") if self._lista_fixa else ("pending",)
+        if atual["status"] not in reservaveis or atual["locked"] == "true":
+            log.info("Item %s não reservado: status %s, locked %s", atual["name"], atual["status"], atual["locked"])
             return None
         marca = f"runner={self.runner_id};token={uuid.uuid4().hex}"
         tentativa = int(atual["attempts_count"] or 0) + 1
@@ -135,10 +158,6 @@ class Fila:
             with self._lock:
                 self.sn.atualizar(TABELA, sys_id, {"remarks": atual["remarks"]})
             raise
-        time.sleep(config.RESERVA_VERIFICACAO)
-        if self._ler(sys_id)["remarks"] != marca:
-            log.info("Item %s reservado por outro runner", atual["name"])
-            return None
         log.info("Reservado %s (tentativa %d)", atual["name"], tentativa)
         return Item(sys_id, atual["name"], atual["request_content"], tentativa, marca)
 
@@ -149,36 +168,49 @@ class Fila:
     # --- andamento -----------------------------------------------------------
 
     def etapa(self, item: Item, etapa: str) -> None:
-        """Confirma a reserva e grava a etapa atual (também renova o lease)."""
-        self.confirmar(item)
-        self._gravar(item.sys_id, {"stage": etapa})
+        """Registra a etapa atual. Só vai ao SN a entrada numa etapa sem retorno, depois de conferir a posse.
+
+        Ex.: "enviando" é gravado (e conferido) antes do Enviar, para o reaper nunca devolver um item que pode ter
+        sido transmitido. As outras etapas ficam no item local (log e comentário de falha) e não gastam requisição.
+        """
+        if etapa in self.sem_retorno and item.etapa not in self.sem_retorno:
+            self.confirmar(item)
+            self._gravar(item.sys_id, {"stage": etapa})
         # Só depois de gravada: se o SN falhar antes, a etapa (ex.: "enviando") não começou.
         item.etapa = etapa
 
-    @contextmanager
-    def heartbeat(self, item: Item) -> Iterator[None]:
+    def iniciar_heartbeat(self, item: Item) -> Callable[[], None]:
+        """Renova o lease do item a cada HEARTBEAT segundos até a função devolvida ser chamada."""
         parar = threading.Event()
 
         def bater() -> None:
             while not parar.wait(config.HEARTBEAT):
                 try:
-                    self.etapa(item, item.etapa)
+                    self._gravar(item.sys_id, {"stage": item.etapa})
                 except Exception:
-                    # Sem heartbeat o reaper devolve o item; a próxima etapa() do runner percebe a perda.
+                    # Sem heartbeat o reaper devolve o item; a conferência antes do Enviar percebe a perda.
                     log.exception("Heartbeat de %s falhou", item.nome)
 
         thread = threading.Thread(target=bater, name=f"heartbeat-{item.nome}", daemon=True)
         thread.start()
+
+        def encerrar() -> None:
+            parar.set()
+            thread.join()
+
+        return encerrar
+
+    @contextmanager
+    def heartbeat(self, item: Item) -> Iterator[None]:
+        encerrar = self.iniciar_heartbeat(item)
         try:
             yield
         finally:
-            parar.set()
-            thread.join()
+            encerrar()
 
     # --- conclusão -------------------------------------------------------------
 
     def concluir(self, item: Item, resposta: str) -> None:
-        self.confirmar(item)
         self._gravar(
             item.sys_id,
             {"status": "success", "locked": "false", "stage": "concluido", "response_content": resposta[:MAX_RESPOSTA]},
@@ -187,7 +219,6 @@ class Fila:
 
     def falhar(self, item: Item, tipo: str, mensagem: str) -> None:
         """Falha definitiva: `business` (dados/arquivos recusados) ou `application` (exige ação manual)."""
-        self.confirmar(item)
         self._gravar(
             item.sys_id,
             {
@@ -210,7 +241,6 @@ class Fila:
         if item.tentativa >= config.MAX_TENTATIVAS:
             self.falhar(item, "application", f"Falhou {item.tentativa} vezes: {mensagem}")
             return "failure"
-        self.confirmar(item)
         espera = timedelta(minutes=5 * item.tentativa)
         self._gravar(item.sys_id, _pendente(mensagem, agora_utc() + espera))
         log.warning("%s devolvido à fila (tentativa %d): %s", item.nome, item.tentativa, mensagem)
@@ -221,7 +251,9 @@ class Fila:
     def reaper(self) -> list[Recolhido]:
         """Devolve (ou falha) itens em andamento cujo runner parou de dar heartbeat."""
         with self._lock:
-            andamento = self.sn.listar(TABELA, f"work_queue.name={self.nome}^status=in_progress", CAMPOS, 200)
+            andamento = self.sn.listar(
+                TABELA, f"work_queue.name={self.nome}{filtro_desde()}^status=in_progress", CAMPOS, 200
+            )
         limite = agora_utc() - timedelta(seconds=config.LEASE)
         recolhidos = []
         for item in andamento:
@@ -251,6 +283,13 @@ class Fila:
                 )
             )
         return recolhidos
+
+
+def filtro_desde() -> str:
+    """Trecho de query que restringe aos work items criados a partir de ITENS_DESDE (fuso do usuário do SN)."""
+    if not config.ITENS_DESDE:
+        return ""
+    return f"^sys_created_on>=javascript:gs.dateGenerate('{config.ITENS_DESDE}','00:00:00')"
 
 
 def _pendente(mensagem: str, a_partir_de: datetime) -> dict[str, object]:

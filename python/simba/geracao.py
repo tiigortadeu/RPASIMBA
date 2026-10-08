@@ -39,7 +39,12 @@ def gerar(app: SimbaApp, atendimento: str) -> ResultadoGeracao:
         return texto.split("\t")[-1].strip() if texto.startswith("hash") else None
 
     codigo = app.expect_value(hash_exibido, config.SCREEN_TIMEOUT, "código hash do Passo 3")
-    pacote = config.SIMBA_HOME / "dadosValidador" / atendimento / "envio" / f"{atendimento}.zip"
+    pacote = config.SIMBA_VALIDADOR_DADOS / atendimento / "envio" / f"{atendimento}.zip"
+    wait_for(
+        lambda: pacote if pacote.is_file() else None,
+        config.SCREEN_TIMEOUT,
+        f"arquivo ZIP gerado para {atendimento}",
+    )
     md5 = hashlib.md5(pacote.read_bytes()).hexdigest()
     # O Simba exibe o MD5 sem zeros à esquerda (ex.: "cf28..." para "0cf28..."); compara pelo valor.
     if int(md5, 16) != int(codigo, 16):
@@ -47,7 +52,13 @@ def gerar(app: SimbaApp, atendimento: str) -> ResultadoGeracao:
     return ResultadoGeracao(codigo, pacote)
 
 
-def fechar(app: SimbaApp) -> None:
-    """Fechar no Passo 3 encerra o Simba; espera o processo sair."""
-    app.control(P3, "Fechar").press()
-    wait_for(lambda: not app.is_alive(), config.SCREEN_TIMEOUT, "Simba encerrar após Fechar")
+def voltar_ao_inicio(app: SimbaApp) -> None:
+    """Voltar (Passo 3 -> Passo 2 -> Passo 1): o Validador segue aberto para o próximo caso.
+
+    Reabrir o Validador a cada caso custa ~3s. Enquanto ele está aberto o dadosValidador do caso fica em uso
+    (não dá para arquivar): o runner o reinicia de tempos em tempos e arquiva os casos acumulados.
+    """
+    app.control(P3, "Voltar").press()
+    app.expect(screens.PASSO_2)
+    app.control(screens.PASSO_2, "Voltar").press()
+    app.expect(screens.PASSO_1)

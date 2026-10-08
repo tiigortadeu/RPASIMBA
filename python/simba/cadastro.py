@@ -6,8 +6,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+import win32con
+import win32gui
+
 from simba import navigation, screens
-from simba.app import SimbaApp
+from simba.app import SimbaApp, tentar_trazer_para_frente
 
 DC = screens.DADOS_DO_CASO
 INV = screens.INVESTIGADO
@@ -193,9 +196,46 @@ def gravar(app: SimbaApp) -> str:
     pergunta = app.window_text(screens.ATENCAO)
     if pergunta != "Confirma gravação?":
         raise AssertionError(f"Confirmação inesperada ao gravar: {pergunta!r}")
-    app.control(screens.ATENCAO, "Sim").press()
+
+    dialogo = app.window(screens.ATENCAO)
+    botao_sim = next(
+        (
+            elemento
+            for _, elemento in dialogo.walk()
+            if elemento.name.strip().lower().lstrip("&") == "sim"
+            and elemento.role in {"push button", "button"}
+        ),
+        None,
+    )
+    if botao_sim is not None:
+        botao_sim.press()
+    else:
+        _confirmar_dialogo_com_enter(dialogo.hwnd)
+
     app.expect(screens.INFORMACAO)
     mensagem = app.window_text(screens.INFORMACAO)
-    app.control(screens.INFORMACAO, "OK").press()
+    informacao = app.window(screens.INFORMACAO)
+    botao_ok = next(
+        (
+            elemento
+            for _, elemento in informacao.walk()
+            if elemento.name.strip().lower().lstrip("&") == "ok"
+            and elemento.role in {"push button", "button"}
+        ),
+        None,
+    )
+    if botao_ok is not None:
+        botao_ok.press()
+    else:
+        _confirmar_dialogo_com_enter(informacao.hwnd)
     app.expect_closed(screens.INFORMACAO)
     return mensagem
+
+
+def _confirmar_dialogo_com_enter(hwnd: int) -> None:
+    """Confirma um diálogo Java quando o JAB não expõe seus botões acessíveis."""
+    if not win32gui.IsWindow(hwnd):
+        raise RuntimeError(f"Janela de confirmação inválida: hwnd={hwnd}")
+    tentar_trazer_para_frente(hwnd)
+    win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
+    win32gui.PostMessage(hwnd, win32con.WM_KEYUP, win32con.VK_RETURN, 0xC0000001)

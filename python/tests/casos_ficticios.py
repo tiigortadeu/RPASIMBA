@@ -20,10 +20,15 @@ def dv_atendimento(orgao: str, caso: str) -> str:
     return f"{digitos[-2]}{digitos[-1]}"
 
 
-def caso_ficticio(numero: int) -> Caso:
-    """Variação do caso de teste: número `numero`, DV calculado e 1 ou 2 investigados (PF, ou PF + PJ)."""
+def dados_ficticios(numero: int) -> dict:
+    """JSON do work item para a variação do caso de teste: número `numero`, DV calculado e 1 ou 2 investigados."""
     dados = json.loads(BASE.read_text(encoding="utf-8"))
     dados["Caso"] = f"{numero:06d}"
     dados["DV"] = dv_atendimento(dados["Destino"].split("-")[0], dados["Caso"])
     dados["Investigados"] = dados["Investigados"][: 1 + numero % 2]
-    return Caso.from_json(dados)
+    return dados
+
+
+def caso_ficticio(numero: int) -> Caso:
+    """Variação do caso de teste: número `numero`, DV calculado e 1 ou 2 investigados (PF, ou PF + PJ)."""
+    return Caso.from_json(dados_ficticios(numero))

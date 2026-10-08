@@ -12,7 +12,7 @@ import win32gui
 
 from simba import config
 
-os.environ.setdefault("RC_JAVA_ACCESS_BRIDGE_DLL", config.JAB_DLL)
+os.environ["RC_JAVA_ACCESS_BRIDGE_DLL"] = config.JAB_DLL
 
 from JABWrapper.jab_types import AccessibleActionsToDo, JavaObject  # noqa: E402
 from JABWrapper.jab_wrapper import JavaAccessBridgeWrapper, JavaWindow  # noqa: E402

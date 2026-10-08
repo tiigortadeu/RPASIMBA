@@ -1,3 +1,5 @@
+> **Documento histórico** (planejamento da migração). O estado atual está em [solucao.md](solucao.md) e a operação na VM em [operacao-vm.md](operacao-vm.md).
+
 # Análise para produção — RPA Simba (Validador + Transmissor) com N runners
 
 **Data:** 05/10/2026

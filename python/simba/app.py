@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Callable, Optional, TypeVar
 
 import psutil
+import pywintypes
 import win32con
 import win32gui
+import win32process
 from JABWrapper.jab_wrapper import APIException
 
 from simba import config, screens
@@ -63,7 +65,21 @@ class SimbaAviso(Exception):
         self.message = message
 
 
-RECOVERABLE = (ElementNotFound, UnexpectedWindow, AppNotRunning, APIException, psutil.Error, OSError)
+# pywintypes.error: chamadas Win32 recusadas (ex.: foco de janela) são falhas técnicas, com nova tentativa.
+RECOVERABLE = (
+    ElementNotFound, UnexpectedWindow, AppNotRunning, APIException, psutil.Error, OSError, pywintypes.error
+)
+
+
+def tentar_trazer_para_frente(hwnd: int) -> None:
+    """Pede o foco para a janela antes de mandar teclas por PostMessage (que chegam mesmo sem foco).
+
+    O Windows recusa o foco a processos em segundo plano (o runner disparado pelo console): segue sem ele.
+    """
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+    except pywintypes.error:
+        log.debug("Foco recusado para a janela %s; enviando a tecla mesmo assim", hwnd)
 
 
 @dataclass
@@ -106,13 +122,28 @@ class SimbaApp:
         self.window(self.programa.inicial, timeout=config.STARTUP_TIMEOUT)
 
     def kill(self) -> None:
+        """Fecha o programa pelas janelas (WM_CLOSE) e mata o que não sair em FECHAR_TIMEOUT.
+
+        Matar a JVM de um programa tira o outro, se estiver aberto, do Java Access Bridge (o Validador some da
+        árvore JAB quando o Transmissor é morto). Fechando pela janela isso não acontece.
+        """
         procs = self.processes()
-        for proc in procs:
+        if not procs:
+            return
+        pids = {p.pid for p in procs}
+
+        def fechar(hwnd: int, _: None) -> None:
+            if win32process.GetWindowThreadProcessId(hwnd)[1] in pids and win32gui.IsWindowVisible(hwnd):
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+
+        win32gui.EnumWindows(fechar, None)
+        _, vivos = psutil.wait_procs(procs, timeout=config.FECHAR_TIMEOUT)
+        for proc in vivos:
             try:
                 proc.kill()
             except psutil.NoSuchProcess:
                 pass
-        psutil.wait_procs(procs, timeout=10)
+        psutil.wait_procs(vivos, timeout=10)
 
     def restart(self) -> None:
         self.kill()

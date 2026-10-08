@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional
 
-from simba import cadastro, config, correcao, geracao, transmissao, validacao
+from simba import arquivo, cadastro, config, correcao, geracao, transmissao, validacao
 from simba.app import SimbaApp
 from simba.cadastro import Caso
 from simba.geracao import ResultadoGeracao
@@ -56,10 +56,15 @@ def processar(app: SimbaApp, caso: Caso, pasta_arquivos: Path) -> ResultadoGerac
         validar(a)
         geracao.abrir_passo3(a, caso.pasta)
         resultado = geracao.gerar(a, caso.pasta)
-        geracao.fechar(a)
+        geracao.voltar_ao_inicio(a)
         resultado.correcoes = list(correcoes)
         return resultado
 
+    if arquivo.dados_validador(caso.pasta).exists() and app.is_alive():
+        # Reprocessar um caso que o Validador aberto já carregou falha ao gravar ("Exclua o atendimento e crie-o
+        # novamente"); reaberto, o Validador regrava o caso existente normalmente.
+        log.info("%s já está no dadosValidador; reabrindo o Validador antes do cadastro", caso.pasta)
+        app.kill()
     app.run_step("cadastro", cadastrar)
     return app.run_step("validar_e_gerar", validar_e_gerar)
 

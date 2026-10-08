@@ -5,13 +5,12 @@ A fila de teste (SN_FILA_TESTE, padrão "Simba Runner Teste") não pode ter rob�
 """
 import os
 import uuid
-from multiprocessing import Pool
 from pathlib import Path
 
 import pytest
 
 from simba import config
-from simba.fila import TABELA, Fila
+from simba.fila import TABELA, Fila, ReservaPerdida
 from simba.servicenow import ServiceNow
 
 pytestmark = pytest.mark.servicenow
@@ -72,16 +71,28 @@ def _consumir(runner_id: str) -> list[str]:
     return reservados
 
 
-def test_runners_concorrentes_reservam_cada_item_uma_unica_vez(sn: ServiceNow, criar_itens) -> None:
-    itens = criar_itens(20)
+def test_runner_consome_todos_os_itens_com_uma_listagem(sn: ServiceNow, criar_itens) -> None:
+    itens = criar_itens(5)
 
-    with Pool(8) as pool:
-        por_runner = pool.map(_consumir, [f"teste-{n}" for n in range(8)])
+    reservados = _consumir("teste")
 
-    reservados = [sys_id for lista in por_runner for sys_id in lista]
-    assert sorted(reservados) == sorted(itens)  # todos processados, nenhum duas vezes
+    assert sorted(reservados) == sorted(itens)
     for sys_id in itens:
         assert sn.obter(TABELA, sys_id, "status")["status"] == "success"
+
+
+def test_runner_que_perdeu_o_item_nao_entra_em_enviando(sn: ServiceNow, criar_itens) -> None:
+    # Um runner por fila; se um segundo subir por engano, a conferência antes do Enviar evita a transmissão dupla.
+    criar_itens(1)
+    primeiro = Fila(sn, FILA_TESTE, frozenset({"enviando"}), runner_id="teste-1")
+    item = primeiro.reservar()
+    sn.atualizar(TABELA, item.sys_id, {"status": "pending", "locked": "false"})
+    segundo = Fila(sn, FILA_TESTE, frozenset({"enviando"}), runner_id="teste-2")
+    assert segundo.reservar().sys_id == item.sys_id
+
+    with pytest.raises(ReservaPerdida):
+        primeiro.etapa(item, "enviando")
+    assert item.etapa != "enviando"
 
 
 def test_item_devolvido_espera_e_conta_tentativa(sn: ServiceNow, criar_itens) -> None:
@@ -147,7 +158,7 @@ def test_anexo_sobe_e_desce_igual(sn: ServiceNow, criar_itens, tmp_path: Path) -
     arquivo.write_bytes("linha de teste ção\r\n".encode("latin-1") * 1000)
 
     sn.anexar(TABELA, sys_id, arquivo)
-    [anexo] = sn.anexos(TABELA, sys_id)
+    [anexo] = sn.anexos(TABELA, sys_id, f"ZZ_YY{TABELA}")
     pasta = tmp_path / "baixado"
     pasta.mkdir()
     baixado = sn.baixar_anexo(anexo, pasta)

@@ -68,4 +68,4 @@ def test_grava_caso_e_atendimento_aparece_no_passo1(simba: SimbaApp, caso: cadas
     lista = simba.control(screens.PASSO_1, "Atendimento a Validar")
     atendimentos = [e.name for _, e in lista.walk() if e is not lista]
     assert atendimentos.count(caso.pasta) == 1
-    assert (config.SIMBA_HOME / "dadosValidador" / caso.pasta).is_dir()
+    assert (config.SIMBA_VALIDADOR_DADOS / caso.pasta).is_dir()

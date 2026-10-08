@@ -1,5 +1,6 @@
 """Cliente REST do ServiceNow (Table API + Attachment API) com usuário de integração (basic auth)."""
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import requests
+
+from simba import config
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +23,22 @@ STATUS_TEMPORARIOS = {429, 500, 502, 503, 504}
 
 class ServiceNowError(Exception):
     pass
+
+
+# O usuário de integração é bloqueado acima de 100 requisições/minuto. Toda requisição do processo (inclusive o
+# heartbeat, em outra thread) respeita um intervalo mínimo; com N runners no mesmo usuário, divida o valor por N.
+_intervalo = 60 / config.SN_REQUISICOES_POR_MINUTO
+_cadencia = threading.Lock()
+_proxima = 0.0
+
+
+def _cadenciar() -> None:
+    global _proxima
+    with _cadencia:
+        agora = time.monotonic()
+        if _proxima > agora:
+            time.sleep(_proxima - agora)
+        _proxima = max(agora, _proxima) + _intervalo
 
 
 def normalizar_instancia(url: str) -> str:
@@ -54,13 +73,18 @@ class ServiceNow:
         self.session = requests.Session()
         self.session.auth = (usuario, senha)
         self.session.headers["Accept"] = "application/json"
+        # O runner usa o cliente em mais de uma thread (heartbeat, esteira) e a requests.Session não é thread-safe.
+        self._lock = threading.RLock()
 
     def _request(self, metodo: str, path: str, repetir: bool = True, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", TIMEOUT)
         tentativas = TENTATIVAS if repetir else 1
         for tentativa in range(1, tentativas + 1):
+            espera = 2**tentativa
+            _cadenciar()
             try:
-                resp = self.session.request(metodo, self.instancia + path, allow_redirects=False, **kwargs)
+                with self._lock:
+                    resp = self.session.request(metodo, self.instancia + path, allow_redirects=False, **kwargs)
             except requests.RequestException as err:
                 if tentativa == tentativas:
                     raise ServiceNowError(f"Falha de conexão com {self.instancia}: {err}") from err
@@ -69,7 +93,10 @@ class ServiceNow:
                 if resp.status_code not in STATUS_TEMPORARIOS or tentativa == tentativas:
                     break
                 log.warning("%s %s: HTTP %d (tentativa %d)", metodo, path, resp.status_code, tentativa)
-            time.sleep(2**tentativa)
+                if resp.status_code == 429:
+                    # Limite de requisições do SN: espera o que ele pedir, no mínimo um minuto.
+                    espera = max(60, int(resp.headers.get("Retry-After", "0") or 0))
+            time.sleep(espera)
         if resp.is_redirect:
             raise ServiceNowError(f"Redirecionado para {resp.headers.get('Location')} (credencial inválida?)")
         if resp.status_code in (401, 403):
@@ -83,6 +110,21 @@ class ServiceNow:
     def listar(self, tabela: str, query: str, campos: str, limite: int = 100) -> list[dict[str, str]]:
         params = {"sysparm_query": query, "sysparm_fields": campos, "sysparm_limit": limite}
         return self._request("GET", f"/api/now/table/{tabela}", params=params).json()["result"]
+
+    def listar_todos(self, tabela: str, query: str, campos: str, pagina: int = 1000) -> list[dict[str, str]]:
+        """Todos os registros da query, `pagina` por requisição (sysparm_offset)."""
+        registros: list[dict[str, str]] = []
+        while True:
+            params = {
+                "sysparm_query": query,
+                "sysparm_fields": campos,
+                "sysparm_limit": pagina,
+                "sysparm_offset": len(registros),
+            }
+            lote = self._request("GET", f"/api/now/table/{tabela}", params=params).json()["result"]
+            registros += lote
+            if len(lote) < pagina:
+                return registros
 
     def obter(self, tabela: str, sys_id: str, campos: str) -> dict[str, str]:
         return self._request("GET", f"/api/now/table/{tabela}/{sys_id}", params={"sysparm_fields": campos}).json()[
@@ -103,21 +145,28 @@ class ServiceNow:
 
     # --- Attachment API --------------------------------------------------
 
-    def anexos(self, tabela: str, sys_id: str) -> list[dict[str, str]]:
+    def anexos(self, tabela: str, sys_id: str, *outras_tabelas: str) -> list[dict[str, str]]:
+        """Anexos do registro; `outras_tabelas` (ex.: ZZ_YY<tabela> dos campos file_attachment) na mesma requisição."""
+        tabelas = ",".join((tabela, *outras_tabelas))
         params = {
-            "sysparm_query": f"table_name={tabela}^table_sys_id={sys_id}",
-            "sysparm_fields": "sys_id,file_name,size_bytes",
+            "sysparm_query": f"table_nameIN{tabelas}^table_sys_id={sys_id}",
+            "sysparm_fields": "sys_id,file_name,size_bytes,table_name",
         }
         return self._request("GET", "/api/now/attachment", params=params).json()["result"]
 
     def baixar_anexo(self, anexo: dict[str, str], pasta: Path) -> Path:
         """Grava o anexo em `pasta` (streaming) e confere o tamanho."""
         destino = pasta / anexo["file_name"]
-        resp = self._request("GET", f"/api/now/attachment/{anexo['sys_id']}/file", stream=True, timeout=DOWNLOAD_TIMEOUT)
-        with destino.open("wb") as f:
-            for bloco in resp.iter_content(1024 * 1024):
-                f.write(bloco)
-        if destino.stat().st_size != int(anexo["size_bytes"]):
+        # A conexão fica presa à resposta até o fim do streaming: nenhuma outra thread usa a sessão enquanto isso.
+        with self._lock:
+            resp = self._request(
+                "GET", f"/api/now/attachment/{anexo['sys_id']}/file", stream=True, timeout=DOWNLOAD_TIMEOUT
+            )
+            with destino.open("wb") as f:
+                for bloco in resp.iter_content(1024 * 1024):
+                    f.write(bloco)
+        # Anexo vazio (ex.: GAB109 sem movimentação) vem com size_bytes "".
+        if destino.stat().st_size != int(anexo["size_bytes"] or 0):
             raise ServiceNowError(f"Download incompleto de {anexo['file_name']}: {destino.stat().st_size} bytes")
         return destino
 

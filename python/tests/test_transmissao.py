@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from gab_ficticio import gerar_gab
 
-from simba import cadastro, config, fluxo, screens, transmissao
+from simba import arquivo, cadastro, fluxo, screens, transmissao
 from simba.app import SimbaApp, SimbaAviso
 
 DADOS = Path(__file__).parent / "data" / "caso_teste.json"
@@ -26,9 +26,10 @@ def atendimento(
     simba: SimbaApp, transmissor: SimbaApp, caso: cadastro.Caso, tmp_path_factory: pytest.TempPathFactory
 ) -> str:
     """Garante o pacote de envio do atendimento de teste gerado pelo Validador."""
-    pacote = config.SIMBA_HOME / "dadosValidador" / caso.pasta / "envio" / f"{caso.pasta}.zip"
+    pacote = arquivo.dados_transmissor(caso.pasta) / "envio" / f"{caso.pasta}.zip"
     if not pacote.is_file():
         fluxo.processar(simba, caso, gerar_gab(caso, tmp_path_factory.mktemp("gab")))
+        arquivo.sincronizar_transmissor(caso.pasta)
         # O Transmissor só lê a lista de atendimentos ao abrir.
         transmissor.kill()
     return caso.pasta
