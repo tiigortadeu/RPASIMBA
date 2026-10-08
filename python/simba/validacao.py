@@ -1,16 +1,19 @@
 """Passo 2: validação dos arquivos de um atendimento já gravado (CC 3454 para Banco, GAB para Corretora)."""
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import win32con
+import win32clipboard
+import win32api
 import win32gui
 from pywinauto import Desktop
 from pywinauto.findwindows import ElementNotFoundError
 
 from simba import config, screens
-from simba.app import SimbaApp, SimbaAviso, colar_no_campo, tentar_trazer_para_frente
+from simba.app import SimbaApp, SimbaAviso, tentar_trazer_para_frente
 from simba.jab import Element, ElementNotFound, wait_for
 
 P2 = screens.PASSO_2
@@ -87,7 +90,7 @@ def selecionar_pasta(app: SimbaApp, pasta: Path) -> None:
     elif _preencher_pasta_via_uia(dialogo.hwnd, caminho):
         log.debug("Campo de pasta preenchido via UI Automation: %s", caminho)
     elif campo is not None:
-        colar_no_campo(campo, caminho)
+        _colar_pasta_no_dialogo(campo, caminho)
         log.debug("Campo de pasta preenchido via JAB/clipboard: %s", caminho)
     else:
         raise RuntimeError(f"Não foi possível localizar o campo de pasta: {pasta}")
@@ -166,6 +169,34 @@ def _preencher_pasta_via_uia(hwnd: int, pasta: str) -> bool:
         except (ElementNotFoundError, RuntimeError, AttributeError):
             continue
     return False
+
+
+def _colar_pasta_no_dialogo(campo, pasta: str) -> None:
+    """Contorna versões do JAB que aceitam set_text, mas não atualizam o campo Java."""
+    win32gui.SetForegroundWindow(campo.hwnd)
+    info = campo.info
+    x, y, width, height = (int(info.x), int(info.y), int(info.width), int(info.height))
+    if width > 0 and height > 0:
+        win32api.SetCursorPos((x + width // 2, y + height // 2))
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, pasta)
+    finally:
+        win32clipboard.CloseClipboard()
+    campo._bridge.jab.request_focus(campo.context)
+    wait_for(lambda: "focused" in campo.refresh().states.split(","), 2, "foco no campo de pasta")
+    time.sleep(0.2)
+    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+    win32api.keybd_event(ord("A"), 0, 0, 0)
+    win32api.keybd_event(ord("A"), 0, win32con.KEYEVENTF_KEYUP, 0)
+    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+    win32api.keybd_event(ord("V"), 0, 0, 0)
+    win32api.keybd_event(ord("V"), 0, win32con.KEYEVENTF_KEYUP, 0)
+    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
 
 
 def _pressionar_enter(hwnd: int) -> None:
