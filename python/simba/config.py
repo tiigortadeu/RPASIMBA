@@ -77,8 +77,6 @@ FILA_VAZIA_ESPERA = 30
 RESERVA_TENTATIVAS = 20
 
 JAB_DLL = os.environ.get("RC_JAVA_ACCESS_BRIDGE_DLL") or r"C:\Windows\System32\WindowsAccessBridge-64.dll"
-# Opções passadas à JVM do Simba ao abri-lo: o mapeamento das telas é em português.
-SIMBA_JAVA_OPCOES = os.environ.get("SIMBA_JAVA_OPCOES") or "-Duser.language=pt -Duser.country=BR"
 
 POLL_INTERVAL = 0.1
 # A abertura leva ~1,5s, mas às vezes a JVM do Simba trava 15-30s+ antes da primeira chamada ao servidor.
